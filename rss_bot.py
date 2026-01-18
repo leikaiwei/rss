@@ -9,11 +9,9 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
 import urllib.parse
 import urllib.request
-from typing import Iterable, List, Set
+from typing import Iterable, List, Optional, Set
 
 try:
     import feedparser
@@ -28,8 +26,8 @@ CONFIG_PATH = os.path.join(ROOT_DIR, "配置文件")
 HISTORY_PATH = os.path.join(ROOT_DIR, "历史记录")
 TELEGRAM_CHAT_ID = "-1003514584440"
 TELEGRAM_API_BASE = "https://api.telegram.org"
-# 首次运行时的最大抓取天数，避免大量历史消息集中推送
-MAX_DAYS = 7
+# 最大获取天数，用于避免首次运行或长时间未运行导致一次推送过多
+MAX_FETCH_DAYS = 7
 
 
 def ensure_config_exists() -> None:
@@ -87,6 +85,26 @@ def extract_entry_id(entry: dict) -> str:
     return f"{link}::{title}"
 
 
+def extract_entry_timestamp(entry: dict) -> Optional[float]:
+    """提取 RSS 条目的时间戳（秒），用于过滤过旧内容。"""
+    # feedparser 会将时间字段解析为 time.struct_time
+    for key in ("published_parsed", "updated_parsed", "created_parsed"):
+        parsed_time = entry.get(key)
+        if parsed_time:
+            return time.mktime(parsed_time)
+    return None
+
+
+def is_recent_entry(entry: dict, max_days: int) -> bool:
+    """判断条目是否在允许的时间范围内。"""
+    timestamp = extract_entry_timestamp(entry)
+    if timestamp is None:
+        # 如果没有时间信息，默认不处理，避免误推送过旧内容
+        return False
+    max_age_seconds = max_days * 24 * 60 * 60
+    return (time.time() - timestamp) <= max_age_seconds
+
+
 def shorten_text(text: str, max_length: int = 200) -> str:
     """缩短文本，避免 Telegram 消息过长。"""
     if len(text) <= max_length:
@@ -133,29 +151,6 @@ def fetch_entries(urls: Iterable[str]) -> List[dict]:
     return entries
 
 
-def parse_entry_datetime(entry: dict) -> datetime | None:
-    """解析条目的时间信息，返回 UTC 时间。"""
-    published = entry.get("published") or entry.get("updated")
-    if not published:
-        return None
-    try:
-        parsed = parsedate_to_datetime(published)
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def is_entry_within_days(entry: dict, max_days: int) -> bool:
-    """判断条目是否在指定天数内。"""
-    entry_time = parse_entry_datetime(entry)
-    if entry_time is None:
-        return False
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max_days)
-    return entry_time >= cutoff
-
-
 def main() -> None:
     """主流程：读取配置、对比历史、发送新消息。"""
     ensure_config_exists()
@@ -163,10 +158,12 @@ def main() -> None:
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
+        print("未获取到 TELEGRAM_BOT_TOKEN，请在环境变量中配置")
         sys.exit(1)
 
     urls = load_config_urls()
     if not urls:
+        print("配置文件中没有可用的 RSS 地址")
         return
 
     history = load_history()
@@ -174,8 +171,8 @@ def main() -> None:
 
     new_entries = []
     for entry in entries:
-        # 仅处理指定天数内的新闻，避免首次运行或长期停用后大量推送
-        if not is_entry_within_days(entry, MAX_DAYS):
+        # 只处理最近 MAX_FETCH_DAYS 天内的新闻，避免一次推送过多
+        if not is_recent_entry(entry, MAX_FETCH_DAYS):
             continue
         entry_id = extract_entry_id(entry)
         if entry_id in history:
