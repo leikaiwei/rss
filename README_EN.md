@@ -24,7 +24,7 @@ A lightweight RSS-to-Telegram bot. It periodically fetches RSS feeds and pushes 
 2. Configure RSS sources:
    ```text
    # Add one RSS URL per line in rss.config
-   https://feeds.appinn.com/appinns/
+   https://news.google.com/rss
    ```
 3. Set Telegram Bot Token:
    ```bash
