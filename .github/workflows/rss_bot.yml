@@ -1,0 +1,47 @@
+name: RSS Bot
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rss-bot:
+    runs-on: ubuntu-latest
+    steps:
+      # 检出代码仓库
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 配置 Python 运行环境
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 安装依赖
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 执行 RSS 推送脚本
+      - name: Run RSS bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: python rss_bot.py
+
+      # 仅在历史记录有变化时提交
+      - name: Commit history update
+        if: ${{ success() }}
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add 历史记录
+          git commit -m "Update RSS history"
+          git push
