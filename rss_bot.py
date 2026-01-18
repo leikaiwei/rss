@@ -27,7 +27,7 @@ HISTORY_PATH = os.path.join(ROOT_DIR, "历史记录")
 TELEGRAM_CHAT_ID = "-1003514584440"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 # 最大获取天数，用于避免首次运行或长时间未运行导致一次推送过多
-MAX_FETCH_DAYS = 7
+MAX_FETCH_DAYS = 1
 
 
 def ensure_config_exists() -> None:
