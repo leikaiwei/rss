@@ -24,7 +24,7 @@
 2. 配置 RSS 地址：
    ```text
    # 在 rss.config 中每行填入一个 RSS 地址
-   https://feeds.appinn.com/appinns/
+   https://news.google.com/rss
    ```
 3. 配置 Telegram Bot Token：
    ```bash
