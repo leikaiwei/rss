@@ -30,6 +30,7 @@ jobs:
       - name: Run RSS bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          WEBHOOK: ${{ secrets.WEBHOOK }}
         run: python rss_bot.py
 
       # 仅在历史记录有变化时提交

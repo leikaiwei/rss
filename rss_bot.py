@@ -2,12 +2,13 @@
 """
 简单的 RSS 订阅推送脚本：
 - 从根目录下的“rss.config”读取 RSS 订阅地址
-- 与“data.json”比对，发现新内容后推送到 Telegram 频道
+- 与“data.json”比对，发现新内容后推送到多消息通知通道
 """
 
 import html
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -29,6 +30,11 @@ TELEGRAM_CHAT_ID = "-1003514584440"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 # 最大获取天数，用于避免首次运行或长时间未运行导致一次推送过多
 MAX_FETCH_DAYS = 1
+# 通知通道开关集中配置，按需启用一个或多个通道
+NOTIFICATION_CHANNELS = {
+    "telegram": False,
+    "webhook": True,
+}
 
 
 # 确保配置文件存在
@@ -128,14 +134,45 @@ def escape_html(text: str) -> str:
     return html.escape(text, quote=True)
 
 
+def build_entry_summary(entry: dict, max_length: int = 200) -> str:
+    """提取并清理条目摘要，便于多通道复用。"""
+    summary = entry.get("summary", "") or entry.get("description", "")
+    summary = html.unescape(summary)
+    summary = re.sub(r"<[^>]+>", "", summary)
+    summary = " ".join(summary.replace("\n", " ").split())
+    return shorten_text(summary, max_length)
+
+
+def extract_entry_thumbnail(entry: dict) -> str:
+    """提取条目缩略图链接，优先使用 RSS 内置媒体字段。"""
+    for key in ("media_thumbnail", "media_content"):
+        media_value = entry.get(key)
+        if isinstance(media_value, list) and media_value:
+            url = media_value[0].get("url") or media_value[0].get("href")
+            if url:
+                return url
+        if isinstance(media_value, dict):
+            url = media_value.get("url") or media_value.get("href")
+            if url:
+                return url
+    for enclosure in entry.get("enclosures", []):
+        url = enclosure.get("href")
+        if url:
+            return url
+    for link in entry.get("links", []):
+        if link.get("rel") == "enclosure":
+            url = link.get("href")
+            if url:
+                return url
+    return ""
+
+
 # 构建发送内容
 def build_message(entry: dict) -> str:
     """构建发送到 Telegram 的消息内容。"""
     title = escape_html(entry.get("title", "(无标题)"))
     source = escape_html(entry.get("source_title", "未知来源"))
-    summary = entry.get("summary", "") or entry.get("description", "")
-    summary = shorten_text(summary.replace("\n", " ").strip())
-    summary = escape_html(summary)
+    summary = escape_html(build_entry_summary(entry))
     link = escape_html(entry.get("link", ""))
     parts = [f"[{source}] 📰 <b>{title}</b>"]
     if summary:
@@ -164,6 +201,56 @@ def send_to_telegram(token: str, chat_id: str, message: str) -> None:
             raise RuntimeError(f"Telegram 发送失败，状态码：{response.status}")
 
 
+def build_webhook_payload(entry: dict) -> dict:
+    """构建 Webhook 消息体，符合指定 JSON 结构。"""
+    summary = build_entry_summary(entry)
+    return {
+        "content": summary,
+        "msgType": 1,
+        "param": {
+            "appName": entry.get("source_title", "未知来源"),
+            "title": entry.get("title", "(无标题)"),
+            "lightAppId": "",
+            "thumbUrl": extract_entry_thumbnail(entry),
+            "webpageUrl": entry.get("link", ""),
+            "customStyle": 0,
+            "content": summary,
+        },
+    }
+
+
+def send_to_webhook(webhook_url: str, payload: dict) -> None:
+    """通过 Webhook 发送消息。"""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(webhook_url, data=data, method="POST")
+    request.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(request, timeout=15) as response:
+        if response.status not in (200, 201, 204):
+            raise RuntimeError(f"Webhook 发送失败，状态码：{response.status}")
+
+
+def get_telegram_config() -> Optional[dict]:
+    """获取 Telegram 通道配置，未启用或缺少配置时返回 None。"""
+    if not NOTIFICATION_CHANNELS.get("telegram"):
+        return None
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        print("未获取到 TELEGRAM_BOT_TOKEN，已跳过 Telegram 通道")
+        return None
+    return {"token": token, "chat_id": TELEGRAM_CHAT_ID}
+
+
+def get_webhook_config() -> Optional[dict]:
+    """获取 Webhook 通道配置，未启用或缺少配置时返回 None。"""
+    if not NOTIFICATION_CHANNELS.get("webhook"):
+        return None
+    webhook_url = os.getenv("WEBHOOK")
+    if not webhook_url:
+        print("未获取到 WEBHOOK，已跳过 Webhook 通道")
+        return None
+    return {"url": webhook_url}
+
+
 # 抓取 RSS 条目
 def fetch_entries(urls: Iterable[str]) -> List[dict]:
     """抓取所有 RSS 条目。"""
@@ -185,10 +272,17 @@ def main() -> None:
     ensure_config_exists()
     ensure_history_exists()
 
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        print("未获取到 TELEGRAM_BOT_TOKEN，请在环境变量中配置")
-        sys.exit(1)
+    # 根据开关集中配置各通道，至少启用一个可用通道
+    telegram_config = get_telegram_config()
+    webhook_config = get_webhook_config()
+    enabled_channels = {
+        "telegram": telegram_config,
+        "webhook": webhook_config,
+    }
+    enabled_channels = {key: value for key, value in enabled_channels.items() if value}
+    if not enabled_channels:
+        print("未启用任何可用的通知通道，请检查开关与环境变量配置")
+        return
 
     urls = load_config_urls()
     if not urls:
@@ -213,8 +307,25 @@ def main() -> None:
         return
 
     for entry in new_entries:
-        message = build_message(entry)
-        send_to_telegram(token, TELEGRAM_CHAT_ID, message)
+        # 逐条推送到启用的通道，支持多通道同时发送
+        if "telegram" in enabled_channels:
+            message = build_message(entry)
+            try:
+                send_to_telegram(
+                    enabled_channels["telegram"]["token"],
+                    enabled_channels["telegram"]["chat_id"],
+                    message,
+                )
+            except Exception as exc:
+                # 通道异常时不阻断整体流程，避免定时任务中断
+                print(f"Telegram 通道发送失败：{exc}")
+        if "webhook" in enabled_channels:
+            payload = build_webhook_payload(entry)
+            try:
+                send_to_webhook(enabled_channels["webhook"]["url"], payload)
+            except Exception as exc:
+                # 通道异常时不阻断整体流程，避免定时任务中断
+                print(f"Webhook 通道发送失败：{exc}")
 
     save_history(history)
 
