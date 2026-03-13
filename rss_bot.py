@@ -6,6 +6,7 @@
 """
 
 import html
+import http.client
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from urllib.error import HTTPError, URLError
 from typing import Iterable, List, Optional, Set
 
 try:
@@ -35,6 +37,15 @@ NOTIFICATION_CHANNELS = {
     "telegram": False,
     "webhook": True,
 }
+
+# 抓取 RSS 时统一使用常见浏览器 UA，降低被源站拒绝概率
+RSS_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+# 单个 RSS 地址的最大重试次数
+RSS_FETCH_RETRIES = 3
 
 
 # 确保配置文件存在
@@ -251,12 +262,40 @@ def get_webhook_config() -> Optional[dict]:
     return {"url": webhook_url}
 
 
+def parse_feed_with_retry(url: str, retries: int = RSS_FETCH_RETRIES) -> Optional[dict]:
+    """抓取并解析单个 RSS，失败时短暂重试。"""
+    for attempt in range(1, retries + 1):
+        try:
+            # 增加请求头，避免部分站点直接断开默认客户端连接
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": RSS_USER_AGENT,
+                    "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                feed_data = response.read()
+            return feedparser.parse(feed_data)
+        except (HTTPError, URLError, TimeoutError, http.client.HTTPException) as exc:
+            if attempt == retries:
+                print(f"RSS 抓取失败（已重试 {retries} 次）：{url}，原因：{exc}")
+                return None
+            # 简单退避，减少连续请求触发限流
+            time.sleep(attempt)
+        except Exception as exc:
+            print(f"RSS 抓取异常，已跳过：{url}，原因：{exc}")
+            return None
+
+
 # 抓取 RSS 条目
 def fetch_entries(urls: Iterable[str]) -> List[dict]:
     """抓取所有 RSS 条目。"""
     entries: List[dict] = []
     for url in urls:
-        feed = feedparser.parse(url)
+        feed = parse_feed_with_retry(url)
+        if not feed:
+            continue
         source_title = feed.feed.get("title") or feed.feed.get("subtitle") or url
         for entry in feed.entries:
             # 为条目补充来源信息
