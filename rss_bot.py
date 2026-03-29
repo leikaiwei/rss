@@ -34,7 +34,8 @@ HISTORY_PATH = os.path.join(ROOT_DIR, "data.json")
 TELEGRAM_CHAT_ID = "-1003514584440"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 # 最大获取天数，用于避免首次运行或长时间未运行导致一次推送过多
-MAX_FETCH_DAYS = 1
+# 默认放宽到 7 天，减少更新频率较低站点漏推
+MAX_FETCH_DAYS = int(os.getenv("MAX_FETCH_DAYS", "7"))
 # 通知通道开关集中配置，按需启用一个或多个通道
 NOTIFICATION_CHANNELS = {
     "telegram": False,
@@ -64,13 +65,20 @@ def parse_feed_content(feed_data: bytes) -> dict:
             pass
 
     feed = feedparser.parse(normalized_data)
-    if feed.entries:
-        return feed
 
-    # 兜底清理 XML 非法控制字符，提升异常 XML 的兼容性
+
+    # bozo 或无条目时，兜底清理 XML 非法控制字符后重试
+    if not getattr(feed, "bozo", False) and feed.entries:
+        return feed
     decoded = normalized_data.decode("utf-8", errors="ignore").lstrip("\ufeff")
     cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", decoded)
-    return feedparser.parse(cleaned)
+    cleaned_feed = feedparser.parse(cleaned)
+
+    # 选择条目更多的结果，尽量避免 malformed XML 导致丢条目
+    if len(cleaned_feed.entries) >= len(feed.entries):
+        return cleaned_feed
+    return feed
+
 
 
 def parse_timestamp_text(value: str) -> Optional[float]:
@@ -174,6 +182,9 @@ def extract_entry_timestamp(entry: dict) -> Optional[float]:
 # 判断条目是否在允许范围
 def is_recent_entry(entry: dict, max_days: int) -> bool:
     """判断条目是否在允许的时间范围内。"""
+    if max_days <= 0:
+        # 允许通过环境变量关闭时间过滤
+        return True
     timestamp = extract_entry_timestamp(entry)
     if timestamp is None:
         # 如果没有时间信息，默认不处理，避免误推送过旧内容
