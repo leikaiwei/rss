@@ -14,6 +14,9 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import gzip
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from typing import Iterable, List, Optional, Set
 
@@ -31,7 +34,8 @@ HISTORY_PATH = os.path.join(ROOT_DIR, "data.json")
 TELEGRAM_CHAT_ID = "-1003514584440"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 # 最大获取天数，用于避免首次运行或长时间未运行导致一次推送过多
-MAX_FETCH_DAYS = 1
+# 默认放宽到 7 天，减少更新频率较低站点漏推
+MAX_FETCH_DAYS = int(os.getenv("MAX_FETCH_DAYS", "7"))
 # 通知通道开关集中配置，按需启用一个或多个通道
 NOTIFICATION_CHANNELS = {
     "telegram": False,
@@ -46,6 +50,54 @@ RSS_USER_AGENT = (
 )
 # 单个 RSS 地址的最大重试次数
 RSS_FETCH_RETRIES = 3
+
+
+def parse_feed_content(feed_data: bytes) -> dict:
+    """解析 RSS 原始内容，兼容压缩与轻度 XML 格式问题。"""
+    normalized_data = feed_data
+
+    # 部分站点会直接返回 gzip 压缩内容，这里做兜底解压
+    if normalized_data.startswith(b"\x1f\x8b"):
+        try:
+            normalized_data = gzip.decompress(normalized_data)
+        except OSError:
+            # 解压失败时继续走原始数据，避免直接中断
+            pass
+
+    feed = feedparser.parse(normalized_data)
+
+    # bozo 或无条目时，兜底清理 XML 非法控制字符后重试
+    if not getattr(feed, "bozo", False) and feed.entries:
+        return feed
+    decoded = normalized_data.decode("utf-8", errors="ignore").lstrip("\ufeff")
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", decoded)
+    cleaned_feed = feedparser.parse(cleaned)
+
+    # 选择条目更多的结果，尽量避免 malformed XML 导致丢条目
+    if len(cleaned_feed.entries) >= len(feed.entries):
+        return cleaned_feed
+    return feed
+
+
+def parse_timestamp_text(value: str) -> Optional[float]:
+    """将文本时间转为时间戳，兼容 RSS 常见时间格式。"""
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+
+    try:
+        return parsedate_to_datetime(text).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        pass
+
+    # 兼容 ISO 时间中的 Z 后缀
+    normalized = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized).timestamp()
+    except ValueError:
+        return None
 
 
 # 确保配置文件存在
@@ -117,12 +169,20 @@ def extract_entry_timestamp(entry: dict) -> Optional[float]:
         parsed_time = entry.get(key)
         if parsed_time:
             return time.mktime(parsed_time)
+    # 兼容部分源站仅提供文本时间字段的情况
+    for key in ("published", "updated", "pubDate", "dc_date", "date"):
+        timestamp = parse_timestamp_text(str(entry.get(key, "")))
+        if timestamp is not None:
+            return timestamp
     return None
 
 
 # 判断条目是否在允许范围
 def is_recent_entry(entry: dict, max_days: int) -> bool:
     """判断条目是否在允许的时间范围内。"""
+    if max_days <= 0:
+        # 允许通过环境变量关闭时间过滤
+        return True
     timestamp = extract_entry_timestamp(entry)
     if timestamp is None:
         # 如果没有时间信息，默认不处理，避免误推送过旧内容
@@ -276,7 +336,10 @@ def parse_feed_with_retry(url: str, retries: int = RSS_FETCH_RETRIES) -> Optiona
             )
             with urllib.request.urlopen(request, timeout=20) as response:
                 feed_data = response.read()
-            return feedparser.parse(feed_data)
+            feed = parse_feed_content(feed_data)
+            if getattr(feed, "bozo", False) and not feed.entries:
+                print(f"RSS 解析异常（bozo），地址：{url}，原因：{feed.bozo_exception}")
+            return feed
         except (HTTPError, URLError, TimeoutError, http.client.HTTPException) as exc:
             if attempt == retries:
                 print(f"RSS 抓取失败（已重试 {retries} 次）：{url}，原因：{exc}")
