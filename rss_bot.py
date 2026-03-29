@@ -66,6 +66,7 @@ def parse_feed_content(feed_data: bytes) -> dict:
 
     feed = feedparser.parse(normalized_data)
 
+
     # bozo 或无条目时，兜底清理 XML 非法控制字符后重试
     if not getattr(feed, "bozo", False) and feed.entries:
         return feed
@@ -77,6 +78,7 @@ def parse_feed_content(feed_data: bytes) -> dict:
     if len(cleaned_feed.entries) >= len(feed.entries):
         return cleaned_feed
     return feed
+
 
 
 def parse_timestamp_text(value: str) -> Optional[float]:
